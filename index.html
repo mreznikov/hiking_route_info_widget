@@ -17,16 +17,14 @@
 <body>
     <h3>Получение данных маршрута с IsraelHiking.org.il</h3>
     <p>Выберите строку в таблице или измените ссылку в колонке 'R' для загрузки деталей маршрута.</p>
+    <p><b>Важно:</b> Если данные не загружаются, проверьте консоль разработчика (F12) на наличие ошибок CORS.</p>
     <div id="status">Ожидание выбора записи...</div>
 
     <script>
-        // === НАЧАЛО СКРИПТА - ЛОГ ВЕРСИИ ===
-        const WIDGET_VERSION = "v2.0.1";
+        const WIDGET_VERSION = "v2.0.2";
         console.log(`DEBUG: Grist IsraelHiking Details Fetcher Загружен - Версия ${WIDGET_VERSION}`);
 
-        // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
         let currentTable1Id = null; 
-        
         const URL_COL_ID = "R";                 
         const DISTANCE_COL_ID = "AD";           
         const ASCENT_COL_ID = "AE";             
@@ -44,9 +42,9 @@
             console.log(`DEBUG: Попытка загрузить HTML с: ${routeUrl}`);
 
             try {
-                const response = await fetch(routeUrl); 
+                const response = await fetch(routeUrl, { mode: 'cors' }); // Явно указываем mode, хотя по умолчанию так и есть
                 if (!response.ok) {
-                    throw new Error(`Ошибка сети: ${response.status} ${response.statusText}`);
+                    throw new Error(`Ошибка сети при загрузке страницы: ${response.status} ${response.statusText}`);
                 }
                 const htmlText = await response.text();
                 console.log("DEBUG: HTML страницы успешно загружен (длина:", htmlText.length, ")");
@@ -55,57 +53,55 @@
                 const doc = parser.parseFromString(htmlText, "text/html");
                 
                 let routeDataJsonString = null;
-                const scriptElementById = doc.getElementById('route-details-data');
+                let routeData = null;
 
-                if (scriptElementById) {
-                    console.log("DEBUG: Найден элемент <script id='route-details-data'>.");
-                    console.log("DEBUG: scriptElementById.textContent (обрезанный):", scriptElementById.textContent?.substring(0, 300));
-                    console.log("DEBUG: scriptElementById.innerHTML (обрезанный):", scriptElementById.innerHTML?.substring(0, 300));
-                    if (scriptElementById.textContent && scriptElementById.textContent.trim() !== "") {
-                        routeDataJsonString = scriptElementById.textContent.trim();
-                    } else if (scriptElementById.innerHTML && scriptElementById.innerHTML.trim() !== "") {
-                        // Иногда JSON может быть внутри комментариев или не напрямую в textContent
-                        // Эта попытка очень грубая
-                        const match = scriptElementById.innerHTML.match(/{.*}/s);
-                        if (match && match[0]) {
-                            routeDataJsonString = match[0];
-                             console.log("DEBUG: Извлечен JSON из innerHTML элемента 'route-details-data'.");
+                // 1. Попытка найти по ID, как предполагалось ранее
+                const scriptElementById = doc.getElementById('route-details-data');
+                if (scriptElementById && scriptElementById.textContent?.trim()) {
+                    console.log("DEBUG: Найден элемент <script id='route-details-data'> с содержимым.");
+                    routeDataJsonString = scriptElementById.textContent.trim();
+                    try {
+                        routeData = JSON.parse(routeDataJsonString);
+                        if (!(typeof routeData.length === 'number' && typeof routeData.ascent === 'number' && typeof routeData.descent === 'number')) {
+                            console.warn("DEBUG: JSON из <script id='route-details-data'> не содержит ожидаемых полей. Содержимое:", routeDataJsonString.substring(0, 300));
+                            routeData = null; // Сбрасываем, если структура не та
                         } else {
-                            console.warn("DEBUG: Элемент <script id='route-details-data'> найден, но textContent и innerHTML (с JSON) пусты или не содержат JSON.");
+                             console.log("DEBUG: Успешно распарсен JSON из <script id='route-details-data'>");
                         }
-                    } else {
-                         console.warn("DEBUG: Элемент <script id='route-details-data'> найден, но textContent пуст.");
+                    } catch (e) {
+                        console.warn("DEBUG: Ошибка парсинга JSON из <script id='route-details-data'>:", e, "Содержимое:", routeDataJsonString.substring(0,300));
+                        routeData = null;
                     }
                 } else {
-                    console.warn("DEBUG: Элемент <script id='route-details-data'> НЕ НАЙДЕН. Попытка найти данные в других <script> тегах.");
+                    console.warn("DEBUG: Элемент <script id='route-details-data'> не найден или пуст.");
+                }
+
+                // 2. Если не нашли по ID или парсинг не удался, ищем во всех скриптах
+                if (!routeData) {
+                    console.log("DEBUG: Поиск данных в других <script> тегах...");
                     const scripts = doc.getElementsByTagName('script');
                     for (let i = 0; i < scripts.length; i++) {
-                        const scriptContent = scripts[i].textContent;
+                        const scriptContent = scripts[i].textContent?.trim();
                         if (scriptContent) {
                             try {
-                                const potentialJson = JSON.parse(scriptContent.trim());
-                                if (potentialJson && typeof potentialJson.length === 'number' && 
-                                    typeof potentialJson.ascent === 'number' && 
-                                    typeof potentialJson.descent === 'number') {
-                                    console.log("DEBUG: Найдены данные маршрута в одном из <script> тегов (содержимое является JSON).");
-                                    routeDataJsonString = scriptContent.trim();
-                                    break; 
+                                // Ищем JSON, который начинается с { и заканчивается } и содержит ключевые слова
+                                if (scriptContent.startsWith("{") && scriptContent.endsWith("}") &&
+                                    scriptContent.includes('"length"') && scriptContent.includes('"ascent"') && 
+                                    scriptContent.includes('"descent"') && scriptContent.includes('"trackId"')) {
+                                    
+                                    const potentialJson = JSON.parse(scriptContent);
+                                    if (typeof potentialJson.length === 'number' && 
+                                        typeof potentialJson.ascent === 'number' && 
+                                        typeof potentialJson.descent === 'number') {
+                                        console.log("DEBUG: Найден подходящий JSON в одном из <script> тегов (индекс:", i, ").");
+                                        routeData = potentialJson;
+                                        break; 
+                                    }
                                 }
-                            } catch (e) { /* не JSON, игнорируем */ }
+                            } catch (e) { /* не JSON или не тот формат, игнорируем */ }
                         }
                     }
                 }
-
-                if (!routeDataJsonString) {
-                    console.error("Не удалось найти данные о маршруте на странице.");
-                    statusDiv.textContent = "Ошибка: Не удалось найти JSON с данными о маршруте на странице. Возможно, данные загружаются динамически, что не поддерживается виджетом.";
-                    statusDiv.className = 'error';
-                    return null;
-                }
-
-                console.log("DEBUG: Извлечен JSON string для парсинга (обрезанный):", routeDataJsonString.substring(0, 200) + "...");
-                const routeData = JSON.parse(routeDataJsonString);
-                console.log("DEBUG: Распарсен JSON:", routeData);
 
                 if (routeData && typeof routeData.length === 'number' && typeof routeData.ascent === 'number' && typeof routeData.descent === 'number') {
                     const distanceKm = (routeData.length / 1000).toFixed(1); 
@@ -117,15 +113,15 @@
                         descent: routeData.descent
                     };
                 } else {
-                    console.error("JSON не содержит ожидаемых полей length, ascent, descent или они не являются числами.");
-                    statusDiv.textContent = "Ошибка: Неверный формат данных о маршруте на странице.";
+                    console.error("Не удалось извлечь валидные данные о маршруте из HTML.");
+                    statusDiv.textContent = "Ошибка: Не удалось извлечь данные о маршруте. Возможно, структура страницы изменилась или данные загружаются динамически.";
                     statusDiv.className = 'error';
                     return null;
                 }
 
             } catch (error) {
                 console.error("ОШИБКА при загрузке или парсинге данных маршрута:", error);
-                if (String(error).includes('Failed to fetch') || String(error).includes('NetworkError')) { // Более общая проверка на сетевые ошибки
+                if (String(error.message).toLowerCase().includes('failed to fetch') || error.name === 'NetworkError') {
                      statusDiv.textContent = "ОШИБКА: Не удалось загрузить данные с сайта. Вероятно, это проблема CORS или сети. Проверьте консоль разработчика (F12).";
                 } else {
                     statusDiv.textContent = `ОШИБКА: ${error.message}`;
@@ -139,11 +135,17 @@
             if (!record || !record.id) {
                 statusDiv.textContent = "Запись не выбрана."; statusDiv.className = ''; return;
             }
-             // Обновляем currentTable1Id из mappings, если доступно и отличается
             if (mappings && mappings.tableId && mappings.tableId !== currentTable1Id) {
-                console.log(`DEBUG: Обновление currentTable1Id с ${currentTable1Id} на ${mappings.tableId} из mappings.`);
                 currentTable1Id = mappings.tableId;
             }
+            if (!currentTable1Id && grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
+                try { currentTable1Id = await grist.selectedTable.getTableId(); } catch(e){}
+            }
+            if (!currentTable1Id && options && options.tableId) { // Попытка из options, если есть
+                 currentTable1Id = options.tableId;
+            }
+
+
             if (!currentTable1Id) {
                  console.error("ОШИБКА: currentTable1Id не установлен. Невозможно обновить запись.");
                  statusDiv.textContent = "Ошибка: ID таблицы не определен."; statusDiv.className = 'error';
@@ -169,11 +171,15 @@
 
             if (routeDetails) {
                 const updatePayload = {};
-                // Заполняем payload только если значение действительно есть и отличается от текущего (или текущее null)
-                if (typeof routeDetails.distance === 'number' && record[DISTANCE_COL_ID] !== routeDetails.distance) updatePayload[DISTANCE_COL_ID] = routeDetails.distance;
-                if (typeof routeDetails.ascent === 'number' && record[ASCENT_COL_ID] !== routeDetails.ascent) updatePayload[ASCENT_COL_ID] = routeDetails.ascent;
-                if (typeof routeDetails.descent === 'number' && record[DESCENT_COL_ID] !== routeDetails.descent) updatePayload[DESCENT_COL_ID] = routeDetails.descent;
+                if (typeof routeDetails.distance === 'number' && record[DISTANCE_COL_ID] != routeDetails.distance) updatePayload[DISTANCE_COL_ID] = routeDetails.distance;
+                if (typeof routeDetails.ascent === 'number' && record[ASCENT_COL_ID] != routeDetails.ascent) updatePayload[ASCENT_COL_ID] = routeDetails.ascent;
+                if (typeof routeDetails.descent === 'number' && record[DESCENT_COL_ID] != routeDetails.descent) updatePayload[DESCENT_COL_ID] = routeDetails.descent;
                 
+                // Принудительное обновление, если старые значения были пустыми
+                if (record[DISTANCE_COL_ID] == null && typeof routeDetails.distance === 'number') updatePayload[DISTANCE_COL_ID] = routeDetails.distance;
+                if (record[ASCENT_COL_ID] == null && typeof routeDetails.ascent === 'number') updatePayload[ASCENT_COL_ID] = routeDetails.ascent;
+                if (record[DESCENT_COL_ID] == null && typeof routeDetails.descent === 'number') updatePayload[DESCENT_COL_ID] = routeDetails.descent;
+
                 if (Object.keys(updatePayload).length > 0) {
                     try {
                         console.log(`DEBUG: Обновление записи ID ${record.id} в ${currentTable1Id} данными:`, updatePayload);
@@ -186,11 +192,13 @@
                         statusDiv.className = 'error';
                     }
                 } else {
-                     console.log(`DEBUG: Данные для записи ID ${record.id} не изменились. Обновление Grist не требуется.`);
+                     console.log(`DEBUG: Данные для записи ID ${record.id} не изменились или невалидны. Обновление Grist не требуется.`);
                      statusDiv.innerHTML += `<br>Данные для маршрута ID ${record.id} не изменились.`;
                 }
             }
         }
+        
+        let initialTableIdSet = false; // Флаг, чтобы grist.onOptions не перезаписывал ID после первой установки
 
         async function initGrist() {
             console.log("DEBUG: initGrist() called");
@@ -210,16 +218,27 @@
                 console.log("DEBUG: grist.ready() завершен.");
 
                 grist.onOptions(async (options, interaction) => {
-                    console.log("DEBUG: grist.onOptions - options:", options, "interaction:", interaction);
-                    let tableIdFromOptions = (options?.tableId) || (interaction?.tableId) || null;
-                    if (tableIdFromOptions) currentTable1Id = tableIdFromOptions;
-                    
-                    if (!currentTable1Id && grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
-                        try { currentTable1Id = await grist.selectedTable.getTableId(); } 
-                        catch (e) { console.error("Ошибка grist.selectedTable.getTableId():", e); }
+                    console.log("DEBUG: grist.onOptions вызвана. options:", options, "interaction:", interaction);
+                    if (!initialTableIdSet) { // Устанавливаем ID только один раз из первого вызова onOptions или selectedTable
+                        let tableIdFromEvent = (options?.tableId) || (interaction?.tableId) || null;
+                        if (tableIdFromEvent) {
+                            currentTable1Id = tableIdFromEvent;
+                            console.log(`DEBUG: ID основной таблицы установлен через onOptions/interaction: ${currentTable1Id}`);
+                            initialTableIdSet = true;
+                        } else if (grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
+                            try { 
+                                currentTable1Id = await grist.selectedTable.getTableId();
+                                if (currentTable1Id) {
+                                    console.log(`DEBUG: ID основной таблицы установлен через grist.selectedTable.getTableId(): ${currentTable1Id}`);
+                                    initialTableIdSet = true;
+                                }
+                            } catch (e) { console.error("Ошибка grist.selectedTable.getTableId():", e); }
+                        }
                     }
-                    if (currentTable1Id) console.log(`DEBUG: ID основной таблицы установлен: ${currentTable1Id}`);
-                    else console.error("ОШИБКА: ID основной таблицы НЕ УСТАНОВЛЕН.");
+                    if (!currentTable1Id) {
+                        console.error("ОШИБКА КРИТИЧЕСКАЯ: ID основной таблицы (Table1) НЕ УСТАНОВЛЕН. Убедитесь, что виджет привязан к таблице в настройках.");
+                        statusDiv.textContent = "Ошибка конфигурации: виджет не связан с таблицей.";
+                    }
                 });
                 
                 grist.onRecord(handleTable1Record); 
